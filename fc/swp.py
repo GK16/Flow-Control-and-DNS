@@ -64,6 +64,12 @@ class SWPSender:
         self._recv_thread.start()
 
         # TODO: Add additional state variables
+        # semaphore for Waiting for a free space in the send window
+        self.semaphore = threading.Semaphore(SWPSender._SEND_WINDOW_SIZE)
+        self.seqCounter = -1
+        self.buffer = {}
+        self.timerMemo = {}
+        self.lastACK = 0
 
     def send(self, data):
         for i in range(0, len(data), SWPPacket.MAX_DATA_SIZE):
@@ -71,12 +77,47 @@ class SWPSender:
 
     def _send(self, data):
         # TODO
+        # 1. Wait for a free space in the send window — a semaphore is the simplest way to handle this.
+        #    A semaphore manages an internal counter which is decremented by each acquire() call
+        self.semaphore.acquire()
 
+        # 2. Assign the chunk of data a sequence number—the first chunk of data is assigned sequence number 0,
+        #    and the sequence number is incremented for each subsequent chunk of data.
+        self.seqCounter += 1
+        seqNum = self.seqCounter
+
+        # 3. Add the chunk of data to a buffer—in case it needs to be retransmitted.
+        self.buffer[seqNum] = data
+
+        # 4. Send the data in an SWP packet with the appropriate type (D) and sequence number —
+        #    use the SWPPacket class to construct such a packet
+        #    and use the send method provided by the LLPEndpoint class to transmit the packet across the network.
+        swpPacket = SWPPacket(SWPType.DATA, seqNum, data)
+        self._llp_endpoint.send(swpPacket.to_bytes())
+
+        # 5. Start a retransmission timer — the Timer class provides a convenient way to do this;
+        #    the timeout should be 1 second, defined by the constant SWPSender._TIMEOUT;
+        #    when the timer expires, the _retransmit method should be called.
+        timer = threading.Timer(SWPSender._TIMEOUT, SWPSender._retransmit, [self, seqNum])
+        self.timerMemo[seqNum] = timer
+        timer.start()
         return
 
     def _retransmit(self, seq_num):
         # TODO
+        # 1. Send the data in an SWP packet with the appropriate type (D) and sequence number
+        #    use the SWPPacket class to construct such a packet
+        #    and use the send method provided by the LLPEndpoint class to transmit the packet across the network.
+        dataCache = self.buffer[seq_num]
+        swpPacket = SWPPacket(SWPType.DATA, seq_num, dataCache)
+        self._llp_endpoint.send(swpPacket.to_bytes())
 
+        # 2. Start a retransmission timer—the Timer class provides a convenient way to do this;
+        #    the timeout should be 1 second, defined by the constant SWPSender._TIMEOUT;
+        #    when the timer expires, the _retransmit method should be called.
+        timer = threading.Timer(SWPSender._TIMEOUT, self._retransmit, [seq_num])
+        timer.start()
+        self.timerMemo[seq_num] = timer
         return
 
     def _recv(self):
@@ -89,6 +130,38 @@ class SWPSender:
             logging.debug("Received: %s" % packet)
 
             # TODO
+            # 1. ignore any packets that aren’t SWP ACKs.
+            if packet.type is not SWPType.ACK:
+                continue
+
+            # 2. ignore SWP ACKs acked
+            seqNum = packet.seq_num
+            if seqNum <= self.lastACK:
+                continue
+
+            # 4. Cancel the retransmission timer for that chunk of data.
+            timer = self.timerMemo[seqNum]
+            timer.cancel()
+
+            # 5. Discard that chunk of data.
+            #    the SWP ACKs are cumulative, so even though an SWP ACK packet only contains one sequence number,
+            #    the ACK effectively acknowledges all chunks of data up to
+            #    and including the chunk of data associated with the sequence number in the SWP ACK.
+            for ind in range(self.lastACK+1, seqNum+1, 1):
+                if ind in self.timerMemo:
+                    timer = self.timerMemo[ind]
+                    timer.cancel()
+                    self.timerMemo.pop(ind)
+                if ind in self.buffer:
+                    self.buffer.pop(ind)
+                self.semaphore.release()
+            self.lastACK = seqNum
+        return
+
+
+
+
+            # 3. Signal that there is now a free space in the send window.
 
         return
 
