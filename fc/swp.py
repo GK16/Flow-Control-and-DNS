@@ -64,11 +64,11 @@ class SWPSender:
         self._recv_thread.start()
 
         # TODO: Add additional state variables
-        self.Buffer = {}
-        self.Timers = {}
-        self.LAST_ACK = 0
-        self.LAST_SENT = 0
-        self.sem = threading.Semaphore(self._SEND_WINDOW_SIZE)
+        self.buffer = {}
+        self.timerMemo = {}
+        self.lastAck = 0
+        self.seqCounter = -1
+        self.semaphore = threading.Semaphore(self._SEND_WINDOW_SIZE)
 
     def send(self, data):
         for i in range(0, len(data), SWPPacket.MAX_DATA_SIZE):
@@ -76,23 +76,30 @@ class SWPSender:
 
     def _send(self, data):
         # TODO
-        # wait for free space
-        self.sem.acquire()
+        # 1. Wait for a free space in the send window — a semaphore is the simplest way to handle this.
+        #    A semaphore manages an internal counter which is decremented by each acquire() call
+        self.semaphore.acquire()
 
-        # ger seq#
-        SEQ = self.LAST_SENT + 1
-        self.LAST_SENT += 1
+        # 2. Assign the chunk of data a sequence number—the first chunk of data is assigned sequence number 0,
+        #    and the sequence number is incremented for each subsequent chunk of data.
+        self.seqCounter += 1
+        seqNum = self.seqCounter + 1
 
-        # add to buffer
+        # 3. Add the chunk of data to a buffer—in case it needs to be retransmitted.
+        self.buffer[seqNum] = data
 
-        self.Buffer.update({SEQ: data})
-        timer = threading.Timer(self._TIMEOUT, self._retransmit, [SEQ])
+        # 4. Send the data in an SWP packet with the appropriate type (D) and sequence number —
+        #    use the SWPPacket class to construct such a packet
+        #    and use the send method provided by the LLPEndpoint class to transmit the packet across the network.
+        swpPacket = SWPPacket(SWPType.DATA, seqNum, data)
+        self._llp_endpoint.send(swpPacket.to_bytes())
+
+        # 5. Start a retransmission timer — the Timer class provides a convenient way to do this;
+        #    the timeout should be 1 second, defined by the constant SWPSender._TIMEOUT;
+        #    when the timer expires, the _retransmit method should be called.
+        timer = threading.Timer(self._TIMEOUT, self._retransmit, [seqNum])
         timer.start()
-        self.Timers.update({SEQ: timer})
-
-        # send pkt
-        pkt = SWPPacket(SWPType.DATA, SEQ, data)
-        self._llp_endpoint.send(pkt.to_bytes())
+        self.timerMemo[seqNum] = timer
 
         return
 
@@ -100,11 +107,11 @@ class SWPSender:
         # TODO
 
         renewed_timer = threading.Timer(self._TIMEOUT, self._retransmit, [seq_num])
-        self.Timers.update({seq_num: renewed_timer})
+        self.timerMemo.update({seq_num: renewed_timer})
         renewed_timer.start()
 
         # send pkt
-        data = self.Buffer[seq_num]
+        data = self.buffer[seq_num]
         pkt = SWPPacket(SWPType.DATA, seq_num, data)
         self._llp_endpoint.send(pkt.to_bytes())
 
@@ -124,14 +131,14 @@ class SWPSender:
                 continue
 
             seq_num = packet.seq_num
-            if seq_num > self.LAST_ACK:
-                (self.Timers[seq_num]).cancel()
-                for i in range(self.LAST_ACK + 1, seq_num + 1):
-                    del self.Buffer[i]
-                    self.Timers[i].cancel()
-                    del self.Timers[i]
-                    self.sem.release()
-                self.LAST_ACK = seq_num
+            if seq_num > self.lastAck:
+                (self.timerMemo[seq_num]).cancel()
+                for i in range(self.lastAck + 1, seq_num + 1):
+                    del self.buffer[i]
+                    self.timerMemo[i].cancel()
+                    del self.timerMemo[i]
+                    self.semaphore.release()
+                self.lastAck = seq_num
 
         return
 
