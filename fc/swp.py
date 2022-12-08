@@ -98,7 +98,7 @@ class SWPSender:
         # 5. Start a retransmission timer — the Timer class provides a convenient way to do this;
         #    the timeout should be 1 second, defined by the constant SWPSender._TIMEOUT;
         #    when the timer expires, the _retransmit method should be called.
-        timer = threading.Timer(SWPSender._TIMEOUT, SWPSender._retransmit, [self, seqNum])
+        timer = threading.Timer(self._TIMEOUT, self._retransmit, [seqNum])
         self.timerMemo[seqNum] = timer
         timer.start()
         return
@@ -115,9 +115,9 @@ class SWPSender:
         # 2. Start a retransmission timer—the Timer class provides a convenient way to do this;
         #    the timeout should be 1 second, defined by the constant SWPSender._TIMEOUT;
         #    when the timer expires, the _retransmit method should be called.
-        timer = threading.Timer(SWPSender._TIMEOUT, self._retransmit, [seq_num])
-        timer.start()
+        timer = threading.Timer(self._TIMEOUT, self._retransmit, [seq_num])
         self.timerMemo[seq_num] = timer
+        timer.start()
         return
 
     def _recv(self):
