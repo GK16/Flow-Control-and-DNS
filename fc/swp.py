@@ -105,16 +105,19 @@ class SWPSender:
 
     def _retransmit(self, seq_num):
         # TODO
-
-        renewed_timer = threading.Timer(self._TIMEOUT, self._retransmit, [seq_num])
-        self.timerMemo.update({seq_num: renewed_timer})
-        renewed_timer.start()
-
-        # send pkt
+        # 1. Send the data in an SWP packet with the appropriate type (D) and sequence number
+        #    use the SWPPacket class to construct such a packet
+        #    and use the send method provided by the LLPEndpoint class to transmit the packet across the network.
         data = self.buffer[seq_num]
         pkt = SWPPacket(SWPType.DATA, seq_num, data)
         self._llp_endpoint.send(pkt.to_bytes())
 
+        # 2. Start a retransmission timer—the Timer class provides a convenient way to do this;
+        #    the timeout should be 1 second, defined by the constant SWPSender._TIMEOUT;
+        #    when the timer expires, the _retransmit method should be called.
+        timer = threading.Timer(self._TIMEOUT, self._retransmit, [seq_num])
+        self.timerMemo[seq_num] = timer
+        timer.start()
         return
 
     def _recv(self):
@@ -127,18 +130,31 @@ class SWPSender:
             logging.debug("Received: %s" % packet)
 
             # TODO
-            if not packet.type is SWPType.ACK:
+            # 1. ignore any packets that aren’t SWP ACKs.
+            if packet.type is not SWPType.ACK:
                 continue
 
-            seq_num = packet.seq_num
-            if seq_num > self.lastAck:
-                (self.timerMemo[seq_num]).cancel()
-                for i in range(self.lastAck + 1, seq_num + 1):
-                    del self.buffer[i]
-                    self.timerMemo[i].cancel()
-                    del self.timerMemo[i]
-                    self.semaphore.release()
-                self.lastAck = seq_num
+            # 2. ignore SWP ACKs acked
+            seqNum = packet.seq_num
+            if seqNum <= self.lastAck:
+                continue
+
+            # 3. Cancel the retransmission timer for that chunk of data.
+            timer = self.timerMemo[seqNum]
+            timer.cancel()
+
+            # 5. Discard that chunk of data.
+            #    the SWP ACKs are cumulative, so even though an SWP ACK packet only contains one sequence number,
+            #    the ACK effectively acknowledges all chunks of data up to
+            #    and including the chunk of data associated with the sequence number in the SWP ACK.
+            for ind in range(self.lastAck + 1, seqNum + 1, 1):
+                if ind in self.buffer:
+                    self.buffer.pop(ind)
+                if ind in self.timerMemo:
+                    temp = self.timerMemo.pop(ind)
+                    temp.cancel()
+                self.semaphore.release()
+            self.lastAck = seqNum
 
         return
 
@@ -159,7 +175,8 @@ class SWPReceiver:
 
         # TODO: Add additional state variables
         self.buffer = []
-        self.ack = 0
+        self.memo = {}
+        self.lastAck = 0
 
     def recv(self):
         return self._ready_data.get()
@@ -172,27 +189,28 @@ class SWPReceiver:
             logging.debug("Received: %s" % packet)
 
             # TODO
+            # 0. Check Packet Type
             if not packet.type is SWPType.DATA:
                 continue
 
-            if not packet.seq_num > self.ack:
-                pkt = SWPPacket(SWPType.ACK, self.ack)
+            # 1. Check if the chunk of data was already acknowledged
+            #    and retransmit an SWP ACK containing the highest acknowledged sequence number.
+            seqNum = packet.seq_num
+            if seqNum <= self.lastAck or seqNum in self.memo:
+                pkt = SWPPacket(SWPType.ACK, self.lastAck)
                 self._llp_endpoint.send(pkt.to_bytes())
                 continue
 
-            repeat = 0
-            for i in range(0, len(self.buffer)):
-                if (packet.seq_num == self.buffer[i].seq_num):
-                    repeat = 1
-                    break
-
-            if repeat == 1:
-                pkt = SWPPacket(SWPType.ACK, self.ack)
-                self._llp_endpoint.send(pkt.to_bytes())
-                continue
-
+            # 2. Add the chunk of data to a buffer — in case it is out of order.
             self.buffer.append(packet)
-            if self._ready_data.qsize() + len(self.buffer) > self._RECV_WINDOW_SIZE:
+            self.memo[seqNum] = True
+
+            # 3. Traverse the buffer, starting from the first buffered chunk of data,
+            #    until reaching a “hole”—i.e., a missing chunk of data.
+            #    All chunks of data prior to this hole should be placed in the _ready_data queue,
+            #    which is where data is read from when an “application” calls recv, and removed from the buffer.
+            if self._ready_data.qsize() + len(self.memo) > self._RECV_WINDOW_SIZE:
+                # self.buffer.sort(key=lambda pk: pk.seq_num)
                 maxN = 0
                 maxIndex = -1
                 for i in range(0, len(self.buffer)):
@@ -200,20 +218,26 @@ class SWPReceiver:
                         maxN = self.buffer[i].seq_num
                         maxIndex = i
                 self.buffer.pop(maxIndex)
+                self.memo.pop(maxIndex)
+
+                # temp = self.buffer.pop()
+                # self.memo.pop(temp.seq_num)
 
             found = 0
 
+            # 4. Send an acknowledgement for the highest sequence number for which all data chunks up to
+            #    and including that sequence number have been received.
             for i in range(0, len(self.buffer)):
                 for j in range(0, len(self.buffer)):
-                    if self.buffer[j].seq_num == self.ack + 1:
+                    if self.buffer[j].seq_num == self.lastAck + 1:
                         self._ready_data.put(self.buffer.pop(j).data)
-                        self.ack = self.ack + 1
+                        self.lastAck = self.lastAck + 1
                         found = 1
                         break
                 if found == 0:
                     break
 
-            pkt = SWPPacket(SWPType.ACK, self.ack)
+            pkt = SWPPacket(SWPType.ACK, self.lastAck)
             self._llp_endpoint.send(pkt.to_bytes())
 
         return
