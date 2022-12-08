@@ -159,13 +159,6 @@ class SWPSender:
         return
 
 
-
-
-            # 3. Signal that there is now a free space in the send window.
-
-        return
-
-
 class SWPReceiver:
     _RECV_WINDOW_SIZE = 5
 
@@ -181,6 +174,8 @@ class SWPReceiver:
         self._recv_thread.start()
 
         # TODO: Add additional state variables
+        self.lastACK = -1
+        self.buffer = {}
 
     def recv(self):
         return self._ready_data.get()
@@ -193,5 +188,36 @@ class SWPReceiver:
             logging.debug("Received: %s" % packet)
 
             # TODO
+            seqNum = packet.seq_num
 
+            # 0. Check Packet Type
+            if packet.type is not SWPType.DATA:
+                continue
+
+            # 1. Check if the chunk of data was already acknowledged
+            #    and retransmit an SWP ACK containing the highest acknowledged sequence number.
+            if seqNum <= self.lastACK or seqNum in self.buffer:
+                continue
+
+            # 2. Add the chunk of data to a buffer — in case it is out of order.
+            self.buffer[seqNum] = packet
+
+            # 3. Traverse the buffer, starting from the first buffered chunk of data,
+            #    until reaching a “hole”—i.e., a missing chunk of data.
+            #    All chunks of data prior to this hole should be placed in the _ready_data queue,
+            #    which is where data is read from when an “application” calls recv, and removed from the buffer.
+            while True:
+                if self.lastACK + 1 in self.buffer:
+                    self.lastACK += 1
+                    # data we are ready to receive
+                    self._ready_data.put(self.buffer[self.lastACK])
+                    self.buffer.pop(self.lastACK)
+                    continue
+
+                # found a "hole"
+                # 4. Send an acknowledgement for the highest sequence number for which all data chunks up to
+                #    and including that sequence number have been received.
+                packet = SWPPacket(SWPType.ACK, self.lastACK)
+                self._llp_endpoint.send(packet.to_bytes())
+                break
         return
