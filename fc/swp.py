@@ -64,6 +64,11 @@ class SWPSender:
         self._recv_thread.start()
 
         # TODO: Add additional state variables
+        self.Buffer = {}
+        self.Timers = {}
+        self.LAST_ACK = 0
+        self.LAST_SENT = 0
+        self.sem = threading.Semaphore(self._SEND_WINDOW_SIZE)
 
     def send(self, data):
         for i in range(0, len(data), SWPPacket.MAX_DATA_SIZE):
@@ -71,11 +76,37 @@ class SWPSender:
 
     def _send(self, data):
         # TODO
+        # wait for free space
+        self.sem.acquire()
+
+        # ger seq#
+        SEQ = self.LAST_SENT + 1
+        self.LAST_SENT += 1
+
+        # add to buffer
+
+        self.Buffer.update({SEQ: data})
+        timer = threading.Timer(self._TIMEOUT, self._retransmit, [SEQ])
+        timer.start()
+        self.Timers.update({SEQ: timer})
+
+        # send pkt
+        pkt = SWPPacket(SWPType.DATA, SEQ, data)
+        self._llp_endpoint.send(pkt.to_bytes())
 
         return
 
     def _retransmit(self, seq_num):
         # TODO
+
+        renewed_timer = threading.Timer(self._TIMEOUT, self._retransmit, [seq_num])
+        self.Timers.update({seq_num: renewed_timer})
+        renewed_timer.start()
+
+        # send pkt
+        data = self.Buffer[seq_num]
+        pkt = SWPPacket(SWPType.DATA, seq_num, data)
+        self._llp_endpoint.send(pkt.to_bytes())
 
         return
 
@@ -89,6 +120,18 @@ class SWPSender:
             logging.debug("Received: %s" % packet)
 
             # TODO
+            if not packet.type is SWPType.ACK:
+                continue
+
+            seq_num = packet.seq_num
+            if seq_num > self.LAST_ACK:
+                (self.Timers[seq_num]).cancel()
+                for i in range(self.LAST_ACK + 1, seq_num + 1):
+                    del self.Buffer[i]
+                    self.Timers[i].cancel()
+                    del self.Timers[i]
+                    self.sem.release()
+                self.LAST_ACK = seq_num
 
         return
 
@@ -108,6 +151,8 @@ class SWPReceiver:
         self._recv_thread.start()
 
         # TODO: Add additional state variables
+        self.buffer = []
+        self.ack = 0
 
     def recv(self):
         return self._ready_data.get()
@@ -120,5 +165,48 @@ class SWPReceiver:
             logging.debug("Received: %s" % packet)
 
             # TODO
+            if not packet.type is SWPType.DATA:
+                continue
+
+            if not packet.seq_num > self.ack:
+                pkt = SWPPacket(SWPType.ACK, self.ack)
+                self._llp_endpoint.send(pkt.to_bytes())
+                continue
+
+            repeat = 0
+            for i in range(0, len(self.buffer)):
+                if (packet.seq_num == self.buffer[i].seq_num):
+                    repeat = 1
+                    break
+
+            if repeat == 1:
+                pkt = SWPPacket(SWPType.ACK, self.ack)
+                self._llp_endpoint.send(pkt.to_bytes())
+                continue
+
+            self.buffer.append(packet)
+            if self._ready_data.qsize() + len(self.buffer) > self._RECV_WINDOW_SIZE:
+                maxN = 0
+                maxIndex = -1
+                for i in range(0, len(self.buffer)):
+                    if self.buffer[i].seq_num > maxN:
+                        maxN = self.buffer[i].seq_num
+                        maxIndex = i
+                self.buffer.pop(maxIndex)
+
+            found = 0
+
+            for i in range(0, len(self.buffer)):
+                for j in range(0, len(self.buffer)):
+                    if self.buffer[j].seq_num == self.ack + 1:
+                        self._ready_data.put(self.buffer.pop(j).data)
+                        self.ack = self.ack + 1
+                        found = 1
+                        break
+                if found == 0:
+                    break
+
+            pkt = SWPPacket(SWPType.ACK, self.ack)
+            self._llp_endpoint.send(pkt.to_bytes())
 
         return
