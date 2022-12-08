@@ -140,8 +140,8 @@ class SWPSender:
                 continue
 
             # 3. Cancel the retransmission timer for that chunk of data.
-            timer = self.timerMemo[seqNum]
-            timer.cancel()
+            tempTimer = self.timerMemo[seqNum]
+            tempTimer.cancel()
 
             # 4. Discard that chunk of data.
             #    the SWP ACKs are cumulative, so even though an SWP ACK packet only contains one sequence number,
