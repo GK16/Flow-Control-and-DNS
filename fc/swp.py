@@ -105,6 +105,11 @@ class SWPSender:
 
     def _retransmit(self, seq_num):
         # TODO
+        if seq_num not in self.buffer:
+            print("seq_num", seq_num)
+            print("self.buffer", self.buffer)
+            return
+
         # 1. Send the data in an SWP packet with the appropriate type (D) and sequence number
         #    use the SWPPacket class to construct such a packet
         #    and use the send method provided by the LLPEndpoint class to transmit the packet across the network.
@@ -140,8 +145,9 @@ class SWPSender:
                 continue
 
             # 3. Cancel the retransmission timer for that chunk of data.
-            tempTimer = self.timerMemo[seqNum]
-            tempTimer.cancel()
+            if seqNum in self.timerMemo:
+                tempTimer = self.timerMemo[seqNum]
+                tempTimer.cancel()
 
             # 4. Discard that chunk of data.
             #    the SWP ACKs are cumulative, so even though an SWP ACK packet only contains one sequence number,
